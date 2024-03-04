@@ -49,7 +49,9 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
             return #err("Unauthorized Access: Only the ledger canister can access this archive canister");
         };
 
-        var txs_iter = txs.vals();
+        let last_tx_index = get_last_tx_index();
+        let filtered_txs = Array.filter<T.Transaction>(txs, func tx = tx.index > last_tx_index);
+        var txs_iter = filtered_txs.vals();
 
         if (trailing_txs > 0) {
             let last_bucket = StableTrieMap.get(
@@ -65,16 +67,16 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
                         Itertools.take(
                             Itertools.chain(
                                 last_bucket.vals(),
-                                Iter.map(txs.vals(), store_tx),
+                                Iter.map(filtered_txs.vals(), store_tx),
                             ),
                             BUCKET_SIZE,
-                        ),
+                        )
                     );
 
                     if (new_bucket.size() == BUCKET_SIZE) {
                         let offset = (BUCKET_SIZE - last_bucket.size()) : Nat;
 
-                        txs_iter := Itertools.fromArraySlice(txs, offset, txs.size());
+                        txs_iter := Itertools.fromArraySlice(filtered_txs, offset, filtered_txs.size());
                     } else {
                         txs_iter := Itertools.empty();
                     };
@@ -90,6 +92,27 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
         };
 
         #ok();
+    };
+
+    func get_last_tx_index() : Int {
+        if (total_txs() == 0) return -1;
+
+        let bucket_index = if (trailing_txs > 0) filled_buckets else Nat.max(filled_buckets - 1, 0);
+        let last_bucket_opt = StableTrieMap.get(
+            txStore,
+            Nat.equal,
+            U.hash,
+            bucket_index,
+        );
+
+        let last_bucket = switch (last_bucket_opt) {
+            case (?last_bucket) last_bucket;
+            case (null) Debug.trap("Unexpected Error: Last Bucket not found");
+        };
+
+        if (last_bucket.size() == 0) Debug.trap("Unexpected Error: Last Bucket is not filled");
+
+        get_tx(last_bucket[last_bucket.size() - 1]).index;
     };
 
     func total_txs() : Nat {
@@ -144,7 +167,7 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
             switch (opt_bucket) {
                 case (?bucket) {
                     if (i == start_bucket) {
-                        iter := Itertools.fromArraySlice(bucket, start % BUCKET_SIZE, Nat.min(bucket.size(), end));
+                        iter := Itertools.fromArraySlice(bucket, start % BUCKET_SIZE, Nat.min(bucket.size(), (start % BUCKET_SIZE) +length));
                     } else if (i + 1 == end_bucket) {
                         let bucket_iter = Itertools.fromArraySlice(bucket, 0, end % BUCKET_SIZE);
                         iter := Itertools.chain(iter, bucket_iter);
@@ -160,7 +183,7 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
             Iter.map(
                 Itertools.take(iter, MAX_TRANSACTIONS_PER_REQUEST),
                 get_tx,
-            ),
+            )
         );
 
         { transactions };
@@ -234,5 +257,9 @@ shared ({ caller = ledger_canister_id }) actor class Archive() : async T.Archive
         } else {
             trailing_txs := bucket.size();
         };
+    };
+
+    public shared (msg) func query_cycle_balance() : async Nat {
+        ExperimentalCycles.balance();
     };
 };
